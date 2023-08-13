@@ -4,15 +4,17 @@ Ongoing PR: https://github.com/microsoft/openjdk-jdk/pull/9
 
 ## Summary
 
-Introduce a new JVM feature for Ergonomics Profiles, with a `shared` profile for the existing heuristics and a `dedicated` option for when the JVM is running on systems with dedicated resources for the one JVM process.
+Introduce a new JVM feature for Ergonomics Profiles, with a `shared` profile for the existing heuristics and a `dedicated` option for when the JVM is running on systems with dedicated resources (memory and CPU) for the one JVM process.
 
 ## Goals
 
 1. Introduce the concept of ergonomics profiles.
-1. Introduce a new flag to select an ergonomic profile.
-1. Define existing heuristics and ergonomics as `shared`.
-1. Introduce a `dedicated` profile designed for systems where the JVM is the dominant process using resources, e.g., in a canonical container deployment scenario.
-1. Automatically select the `dedicated` profile when the JVM believes the system has dedicated resources to it.
+2. Introduce a new flag to select an ergonomic profile.
+3. Define existing heuristics and ergonomics as `shared`.
+4. Introduce a `dedicated` profile designed for systems where the JVM is the dominant process using resources, e.g., in a canonical container deployment scenario. The purpose of this profile is to utilize most of the resources allocated to the machine/container.  
+5. Automatically select the `dedicated` profile when the JVM believes the system has dedicated resources to it.
+6. The JVM will make a better effort to remain withing the total memory limit. 
+
 
 ## Non-Goals
 
@@ -28,7 +30,8 @@ The original design of default JVM ergonomics and heuristics was aimed at tradit
 
 A study in 2023 by New Relic, an APM vendor with access to millions of JVMs in production, identified that more than 70% of their customers' JVMs were running inside environments with resources dedicated to the JVM (i.e., in containers). Many of these JVMs with dedicated resources were running without explicit JVM tuning flags. Therefore the JVM was running with default ergonomics traditionally aimed at shared environments. Under this condition, the JVM does not utilize most of the memory available, and the workload wastes resources. Users then tend to resort to horizontal scaling to address performance issues before addressing resource planning for the JVM (and its tuning). This premature move to horizontal scaling, in turn, leads to more resource waste, both in terms of computing resources and engineering resources with hours spent in monitoring, configuring, and operationalizing the deployments, followed by manual tuning).
 
-With an increase, by default, of resource consumption in environments with dedicated resources for the JVM process, the JVM has more opportunities to improve throughput and latency, or at the least, meet the resource consumption (footprint) expected by the user.
+With an increase, by default, of resource consumption in environments with dedicated resources for the JVM process, the JVM has more opportunities to improve throughput and latency, or at the least, meet the resource consumption (footprint) expected by the user. 
+On the other hand allocating too much resources to the JVM can be dangerous. Allocating too many CPU threads to GC can hur performance and even more dangerous breaching the container memory limit will cause the OOMKiller to kick in and brutally kill the JVM process. 
 
 Currently, the default ergonomics of the HotSpot JVM are:
 
@@ -129,17 +132,30 @@ The table below describes what the `dedicated` profile will set for the JVM:
 | \>2048 MB  | \>1        | G1          |
 | \>=16 GB   | \>1        | ZGC         |
 
-#### Default maximum heap size
+* Memory refers to the physical machine excluding swap space on a physical/virtual machine and the cgroup memory limit in the case of a container. 
+
+#### Default min/max heap size
 
 We progressively grow the heap size percentage based on the available memory to reduce waste on memory reserved for off-heap (native) operations. This heap size percentage growth is an estimate that native memory usage is required at occasional moments throughout the operation of the JVM for most applications. Otherwise, if the percentage were to be the same, progressive waste would exist. Users are still encouraged to monitor and observe memory consumption and adjust heap size allocation accordingly.
 
-| Memory      | Heap size |
-| ----------- | --------- |
-| <  0.5 GB   | 50%       |
-| >= 0.5 GB   | 75%       |
-| >= 4   GB   | 80%       |
-| >= 6   GB   | 85%       |
-| >= 16  GB   | 90%       |
+| Memory      | Min Heap size |
+| ----------- |---------------|
+| <  0.5 GB   | 50%           |
+| >= 0.5 GB   | 75%           |
+| >= 4   GB   | 80%           |
+| >= 6   GB   | 85%           |
+| >= 16  GB   | 90%           |
+
+
+
+#### Changes in the Mechanism to increase heap size 
+Introduce another internal Parameter in the JVM effective_max_heap_size. When the JVM is about to increase the JVM heap size it 
+will not be able to pass this value.When the JVM starts effective_max_heap_size = min heap size. After the JVM stabilizes
+effective_max_heap_size = MemSize - All Non Heap Memory Size - slackMB
+slackMB = 50M and is configurable 
+
+once effective_max_heap_size is set the heap cannot be increased anymore in addition native memory allocations will be blocked which slackmemory is depleted. 
+this includes: new threads, loading classes and code cache optimizations. The purpose of this is to prevent an OOMKIll at all cost.  
 
 ### API to identify selected profile
 
@@ -183,7 +199,7 @@ We will provide other tests to validate the heuristics of the `dedicated` profil
 
 ## Risks and Assumptions
 
-None at this time.
+Allocating too much memory for the process can cause the container to be killed. 
 
 ## Dependencies
 
